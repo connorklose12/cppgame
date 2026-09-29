@@ -1,0 +1,66 @@
+<!doctype html>
+<title>Purple World</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1a1020; overflow: hidden; }
+  /* Responsive canvas: scales to fill the screen on any device without distortion */
+  canvas { display: block; width: 100vw; height: 100vh; object-fit: contain; margin: auto; }
+
+  /* Touch controls: hidden on desktop, shown only on touch/coarse-pointer devices (phones, iOS, tablets) */
+  #touch { display: none; }
+  @media (pointer: coarse) {
+    #touch { display: block; }
+  }
+  #touch button {
+    position: fixed; width: 56px; height: 56px; border-radius: 50%;
+    background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.5);
+    color: white; font: bold 16px sans-serif; touch-action: none; user-select: none;
+  }
+  /* Left side: movement d-pad */
+  #up    { left: 78px;  bottom: 148px; }
+  #down  { left: 78px;  bottom: 20px;  }
+  #left  { left: 14px;  bottom: 84px;  }
+  #right { left: 142px; bottom: 84px;  }
+  /* Right side: action + camera buttons */
+  #action { right: 20px;  bottom: 30px; width: 76px; height: 76px; background: rgba(140,70,200,0.5); }
+  #lookL  { right: 170px; bottom: 100px; }
+  #lookR  { right: 20px;  bottom: 100px; }
+  #zoomIn { right: 170px; bottom: 168px; }
+  #zoomOut{ right: 20px;  bottom: 168px; }
+</style>
+<body>
+  <canvas id="canvas" tabindex="1" oncontextmenu="event.preventDefault()"></canvas>
+
+  <!-- On-screen touch controls (desktop players use the keyboard hint drawn in-game instead) -->
+  <div id="touch">
+    <button id="up">&uarr;</button>
+    <button id="down">&darr;</button>
+    <button id="left">&larr;</button>
+    <button id="right">&rarr;</button>
+    <button id="action">Space</button>
+    <button id="lookL">Q</button>
+    <button id="lookR">E</button>
+    <button id="zoomIn">Z</button>
+    <button id="zoomOut">X</button>
+  </div>
+
+  <script>
+    var Module = { canvas: document.getElementById('canvas') };
+    // stop Space and arrow keys from scrolling the page
+    addEventListener('keydown', e => { if (e.code == 'Space' || e.code.startsWith('Arrow')) e.preventDefault(); });
+
+    // Each touch button just presses the matching keyboard key, so the C++ code
+    // needs no touch-specific logic at all - it only ever sees "key" events.
+    function bindTouchButton(id, code) {
+      var el = document.getElementById(id);
+      var press   = ev => { ev.preventDefault(); dispatchEvent(new KeyboardEvent('keydown', { code })); };
+      var release = ev => { ev.preventDefault(); dispatchEvent(new KeyboardEvent('keyup',   { code })); };
+      el.addEventListener('touchstart', press);
+      el.addEventListener('touchend', release);
+      el.addEventListener('touchcancel', release);
+    }
+    [['up','ArrowUp'], ['down','ArrowDown'], ['left','ArrowLeft'], ['right','ArrowRight'],
+     ['action','Space'], ['lookL','KeyQ'], ['lookR','KeyE'], ['zoomIn','KeyZ'], ['zoomOut','KeyX']
+    ].forEach(([id, code]) => bindTouchButton(id, code));
+  </script>
+  {{{ SCRIPT }}}
+</body>

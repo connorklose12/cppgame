@@ -1,0 +1,9 @@
+{
+  "walkSpeed": 5.0,
+  "jumpHeight": 9.0,
+  "playerColor": "#8C46C8",
+  "npc1Color": "#F0CD28",
+  "npc2Color": "#E07A2E",
+  "flowerRed": "#E4453A",
+  "flowerPink": "#F2A0C4"
+}

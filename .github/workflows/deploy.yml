@@ -1,0 +1,39 @@
+name: Deploy game to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mymindstorm/setup-emsdk@v14
+
+      - name: Download raylib for the web
+        run: |
+          curl -sL -o raylib.zip https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_webassembly.zip
+          unzip -q raylib.zip -d game/raylib
+
+      - name: Build the game
+        working-directory: game
+        run: |
+          chmod +x build-web.sh
+          ./build-web.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: MyProject/wwwroot
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

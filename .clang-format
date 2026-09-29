@@ -1,0 +1,12 @@
+# .NET build output
+bin/
+obj/
+
+# Compiled web game (rebuild with game/build-web.bat)
+MyProject/wwwroot/
+
+# Editor/OS clutter
+.vs/
+.vscode/
+*.user
+.DS_Store

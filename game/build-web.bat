@@ -1,0 +1,2 @@
+if not exist ..\MyProject\wwwroot mkdir ..\MyProject\wwwroot
+emcc main.cpp -o ..\MyProject\wwwroot\index.html -Os -Iraylib\include -Lraylib\lib -lraylib -sUSE_GLFW=3 -sEXPORTED_RUNTIME_METHODS=stringToUTF8,UTF8ToString --preload-file assets@assets --preload-file config.json@config.json --shell-file shell.html -DPLATFORM_WEB
