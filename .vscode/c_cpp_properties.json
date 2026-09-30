@@ -1,0 +1,22 @@
+{
+  "configurations": [
+    {
+      "name": "Emscripten",
+      "compilerPath": "C:/emsdk/upstream/bin/clang.exe",
+      "compilerArgs": ["--target=wasm32-unknown-emscripten", "--sysroot=C:/emsdk/upstream/emscripten/cache/sysroot"],
+      "includePath": [
+        "${workspaceFolder}/game",
+        "${workspaceFolder}/game/raylib/include",
+        "C:/emsdk/upstream/emscripten/cache/sysroot/include/c++/v1",
+        "C:/emsdk/upstream/emscripten/cache/sysroot/include",
+        "C:/emsdk/upstream/emscripten/system/include",
+        "C:/emsdk/upstream/lib/clang/**"
+      ],
+      "defines": ["PLATFORM_WEB", "__EMSCRIPTEN__"],
+      "cStandard": "c11",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "clang-x86"
+    }
+  ],
+  "version": 4
+}
