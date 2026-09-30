@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  contents: read
   pages: write
   id-token: write
 
@@ -17,6 +18,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check the game files were committed
+        run: |
+          for f in game/main.cpp game/shell.html game/config.json game/dialogue.json game/jsonutil.h \
+                   game/npc_brain.h game/npc_brain_weights.h game/assets/sounds/music.wav; do
+            test -f "$f" || { echo "MISSING from the repo: $f (did you git add it?)"; exit 1; }
+          done
 
       - uses: mymindstorm/setup-emsdk@v14
 
