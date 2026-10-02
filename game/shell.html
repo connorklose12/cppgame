@@ -26,11 +26,28 @@
   #lookR  { right: 20px;  bottom: 100px; }
   #zoomIn { right: 170px; bottom: 168px; }
   #zoomOut{ right: 20px;  bottom: 168px; }
+  #swing  { right: 110px; bottom: 30px;  background: rgba(200,120,60,0.5); }   /* swing the stick / knife (F) */
+  #save   { right: 94px;  bottom: 100px; }                                     /* save your file (P) */
+  #guess  { right: 20px;  bottom: 236px; }                                     /* guess who dies next (G) */
+
+  /* The Gemini API key button (every player uses their own key; it is stored only in their browser) */
+  #keybtn { position: fixed; top: 6px; right: 6px; z-index: 5; font: 12px sans-serif; padding: 4px 9px; border-radius: 6px;
+            background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.4); cursor: pointer; }
+  #keylink { position: fixed; top: 64px; right: 8px; z-index: 5; font: 12px sans-serif; color: #9fe0ff; text-decoration: underline; }
+  #sndbtn { position: fixed; top: 34px; right: 6px; z-index: 5; font: 12px sans-serif; padding: 4px 9px; border-radius: 6px; cursor: pointer; border: 1px solid rgba(255,255,255,0.4); color: #fff; background: rgba(255,255,255,0.15); }
+  #sndbtn.on { background: rgba(70,170,90,0.85); }
+  #sndbtn.off { background: rgba(255,200,60,0.9); color: #222; font-weight: bold; }
+  #keybtn.needed { background: rgba(255,200,60,0.9); color: #222; font-weight: bold; }
+  #keybtn.rejected { background: rgba(255,90,90,0.95); color: #fff; font-weight: bold; }
 </style>
 <body>
   <canvas id="canvas" tabindex="1" oncontextmenu="event.preventDefault()"></canvas>
 
   <!-- On-screen touch controls (desktop players use the keyboard hint drawn in-game instead) -->
+  <button id="sndbtn" title="Turn the game's sound on (and play a test chirp)">Sound</button>
+  <button id="keybtn" title="Set your Google Gemini API key">API key</button>
+  <a id="keylink" href="https://aistudio.google.com/api-keys?projectFilter=gen-lang-client-0222120615" target="_blank" rel="noopener">Get a free key</a>
+
   <div id="touch">
     <button id="up">&uarr;</button>
     <button id="down">&darr;</button>
@@ -41,9 +58,151 @@
     <button id="lookR">E</button>
     <button id="zoomIn">Z</button>
     <button id="zoomOut">X</button>
+    <button id="swing">F</button>
+    <button id="save">P</button>
+    <button id="guess">G</button>
   </div>
 
   <script>
+    // =====================================================================================================
+    // SOUND. In the browser the game plays YOUR sound files (assets/sounds/*.wav) with the Web Audio API: the game hands each file's
+    // bytes to loadWav() at startup and the browser decodes them itself, so it does not depend on raylib's audio at all. Any sound whose
+    // file is missing falls back to a built-in synthesized one, so there is always sound.
+    // Browsers keep audio muted until the page gets a key press, click or tap, so the first one of those turns it on; the "Sound" button at
+    // the top of the page shows whether it is on (and how many of your files it is using) and plays a test chirp when clicked.
+    // The C++ side calls GameAudio.play('talk' | 'blip' | 'footstep' | 'jump' | 'door'), GameAudio.setVolume(0..1) and GameAudio.status().
+    // =====================================================================================================
+    window.GameAudio = (function () {
+      var Ctor = window.AudioContext || window.webkitAudioContext;
+      // LOUDNESS: every file is first normalised to the same peak (so quiet old files and loud new ones sound alike), then sound effects are
+      // played through a quieter bus than the music. Change these two numbers to taste (0 = silent, 1 = loudest).
+      var SFX_LEVEL = 0.30, MUSIC_LEVEL = 0.45, TARGET_PEAK = 0.6;
+      var NAMES = ['footstep', 'jump', 'door', 'blip', 'talk', 'music'];
+      var ctx = null, master = null, sfxBus = null, musicBus = null, analyser = null, noiseBuf = null;
+      var files = {}, buffers = {}, decoding = {}, pending = 0, volume = 1;
+      var unlocked = false, musicStarted = false, musicSynth = false, musicNode = null, nextBar = 0, bar = 0;
+      var CHORDS = [[261.63, 329.63, 392.0], [220.0, 261.63, 329.63], [174.61, 220.0, 261.63], [196.0, 246.94, 293.66]];   // C, Am, F, G
+
+      function ensure() {                        // create (on the first gesture) and wake the audio engine
+        if (!Ctor) return false;
+        if (!ctx) {
+          ctx = new Ctor();
+          master = ctx.createGain(); master.gain.value = volume;
+          analyser = ctx.createAnalyser(); analyser.fftSize = 512;     // (only read by the tests, to prove the sound is not silent)
+          master.connect(analyser); analyser.connect(ctx.destination);
+          sfxBus = ctx.createGain(); sfxBus.gain.value = SFX_LEVEL; sfxBus.connect(master);
+          musicBus = ctx.createGain(); musicBus.gain.value = MUSIC_LEVEL; musicBus.connect(master);
+          noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.4), ctx.sampleRate);
+          var d = noiseBuf.getChannelData(0); for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+          Object.keys(files).forEach(decodeOne);                       // files that arrived before the first key press
+        }
+        if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+        return true;
+      }
+      function decodeOne(name) {                 // turn a file's bytes into playable audio, and note how loud it is so it can be normalised
+        if (!ctx || !files[name] || buffers[name] || decoding[name]) return;
+        decoding[name] = true; pending++;
+        function done(buf) {
+          pending--; delete decoding[name];
+          if (buf) {
+            var peak = 0;
+            for (var c = 0; c < buf.numberOfChannels; c++) { var d = buf.getChannelData(c); for (var i = 0; i < d.length; i++) { var v = Math.abs(d[i]); if (v > peak) peak = v; } }
+            buffers[name] = { buf: buf, gain: peak > 0.001 ? TARGET_PEAK / peak : 1 };
+            if (name === 'music' && musicStarted && !musicNode) { musicSynth = false; startFileMusic(); }   // the file arrived after the built-in loop had begun: switch over
+          }
+          if (pending === 0 && unlocked) startMusic();
+          refreshButton();
+        }
+        try {
+          var pr = ctx.decodeAudioData(files[name].slice(0), function (b) { done(b); }, function () { done(null); });
+          if (pr && pr.catch) pr.catch(function () {});     // (a bad file also rejects this promise: the error callback above already handled it)
+        } catch (e) { done(null); }
+      }
+      // one note: oscillator -> its own volume envelope (quick attack, exponential fade) -> a bus
+      function tone(type, f0, f1, t0, dur, peak, bus, attack) {
+        var o = ctx.createOscillator(), g = ctx.createGain(), at = attack || 0.005;
+        o.type = type; o.frequency.setValueAtTime(f0, t0);
+        if (f1) o.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+        g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(peak, t0 + at); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        o.connect(g); g.connect(bus || sfxBus); o.start(t0); o.stop(t0 + dur + 0.05);
+      }
+      function noise(t0, dur, peak, cutoff) {
+        var s = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+        s.buffer = noiseBuf; f.type = 'lowpass'; f.frequency.value = cutoff;
+        g.gain.setValueAtTime(peak, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        s.connect(f); f.connect(g); g.connect(sfxBus); s.start(t0); s.stop(t0 + dur + 0.02);
+      }
+      var SFX = {                                // the built-in fallbacks (used only for a sound whose file is missing)
+        talk:     function (t) { tone('sine', 587.33, 0, t, 0.11, 0.6); tone('sine', 880, 0, t + 0.11, 0.2, 0.6); tone('sine', 1174.7, 0, t + 0.11, 0.2, 0.15); },
+        blip:     function (t) { tone('sine', 1046.5, 0, t, 0.1, 0.5); },
+        footstep: function (t) { tone('sine', 95, 50, t, 0.13, 0.55); noise(t, 0.1, 0.3, 900); },
+        jump:     function (t) { tone('sine', 280, 930, t, 0.22, 0.5); },
+        door:     function (t) { tone('square', 110, 75, t, 0.28, 0.12); tone('sine', 70, 45, t + 0.28, 0.2, 0.7); noise(t + 0.28, 0.18, 0.35, 500); }
+      };
+      // background music: your music.wav looped, or (if there is no file) a gentle built-in loop scheduled a little ahead of time
+      function startFileMusic() {
+        var b = buffers.music; if (!b || musicNode) return;
+        var s = ctx.createBufferSource(), g = ctx.createGain();
+        s.buffer = b.buf; s.loop = true; g.gain.value = b.gain; s.connect(g); g.connect(musicBus); s.start(); musicNode = s;
+      }
+      function scheduleMusic() {
+        if (!ctx || !musicStarted || !musicSynth || ctx.state !== 'running') return;
+        while (nextBar < ctx.currentTime + 1.5) {
+          var ch = CHORDS[bar % 4];
+          for (var i = 0; i < 3; i++) tone('triangle', ch[i] / 2, 0, nextBar, 4.0, 0.12, musicBus, 0.5);
+          for (var k = 0; k < 8; k++) tone('sine', ch[k % 3] * 2, 0, nextBar + k * 0.5, 0.45, 0.07, musicBus);
+          nextBar += 4.0; bar++;
+        }
+      }
+      function startMusic() {
+        if (musicStarted || !ctx) return;
+        musicStarted = true;
+        if (buffers.music) startFileMusic(); else { musicSynth = true; nextBar = ctx.currentTime + 0.1; scheduleMusic(); }
+      }
+      setInterval(scheduleMusic, 400);
+
+      var api = {
+        status: function () { return !ctx ? 0 : (ctx.state === 'running' ? 2 : 1); },          // 0 = not started yet, 1 = waiting for a key press/click, 2 = on
+        loadWav: function (name, bytes) {                                                       // called by the game at startup, once per sound file
+          if (NAMES.indexOf(name) < 0 || !bytes || !bytes.byteLength) return;
+          files[name] = (bytes.buffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) ? bytes.buffer : bytes.slice().buffer;
+          decodeOne(name); refreshButton();
+        },
+        filesUsed: function () { return Object.keys(buffers).length; },                         // how many of your sound files are actually playing
+        unlock: function () {                                                                    // called by any key press, click or tap
+          if (!ensure()) return;
+          unlocked = true; if (pending === 0) startMusic(); scheduleMusic(); refreshButton();
+        },
+        play: function (name) {
+          if (!ctx) return;
+          if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+          var b = name !== 'music' && buffers[name], t = ctx.currentTime + 0.005;
+          if (b) { var s = ctx.createBufferSource(), g = ctx.createGain(); s.buffer = b.buf; g.gain.value = b.gain; s.connect(g); g.connect(sfxBus); s.start(t); }
+          else if (SFX[name]) SFX[name](t);
+        },
+        setVolume: function (v) { volume = Math.max(0, Math.min(1, v)); if (master) master.gain.value = volume; },
+        test: function () { if (ensure()) { api.unlock(); api.play('talk'); } refreshButton(); },
+        _setMusic: function (on) { if (musicBus) musicBus.gain.value = on ? MUSIC_LEVEL : 0; },                 // (tests only: measure the effects without the music)
+        _freq: function () {                                                                     // the loudest pitch right now, in Hz (for the automated tests: tells a file from a built-in sound)
+          if (!analyser) return 0; var d = new Float32Array(analyser.frequencyBinCount); analyser.getFloatFrequencyData(d);
+          var bi = 0; for (var i = 1; i < d.length; i++) if (d[i] > d[bi]) bi = i; return bi * ctx.sampleRate / analyser.fftSize;
+        },
+        _level: function () {                                                                    // loudest sample right now (for the automated tests)
+          if (!analyser) return 0; var d = new Float32Array(analyser.fftSize); analyser.getFloatTimeDomainData(d);
+          var m = 0; for (var i = 0; i < d.length; i++) m = Math.max(m, Math.abs(d[i])); return m;
+        }
+      };
+      function refreshButton() {
+        var b = document.getElementById('sndbtn'); if (!b) return;
+        var st = !Ctor ? -1 : api.status(), n = api.filesUsed();
+        b.className = st === 2 ? 'on' : 'off';
+        b.textContent = st === -1 ? 'Sound: not supported' : (st === 2 ? 'Sound: on - ' + (n ? n + ' of 6 sound files' : 'built-in sounds') : 'Sound off - click here or press any key');
+      }
+      ['keydown', 'pointerdown', 'mousedown', 'touchstart', 'click'].forEach(function (t) { window.addEventListener(t, function () { api.unlock(); }, true); });
+      setInterval(refreshButton, 500);
+      document.addEventListener('DOMContentLoaded', function () { var b = document.getElementById('sndbtn'); if (b) b.onclick = function (e) { e.stopPropagation(); api.test(); }; refreshButton(); });
+      return api;
+    })();
     var Module = { canvas: document.getElementById('canvas') };
     // stop Space and arrow keys from scrolling the page
     addEventListener('keydown', e => { if (e.code == 'Space' || e.code.startsWith('Arrow')) e.preventDefault(); });
@@ -59,41 +218,308 @@
       el.addEventListener('touchcancel', release);
     }
     [['up','ArrowUp'], ['down','ArrowDown'], ['left','ArrowLeft'], ['right','ArrowRight'],
-     ['action','Space'], ['lookL','KeyQ'], ['lookR','KeyE'], ['zoomIn','KeyZ'], ['zoomOut','KeyX']
+     ['action','Space'], ['lookL','KeyQ'], ['lookR','KeyE'], ['zoomIn','KeyZ'], ['zoomOut','KeyX'],
+     ['swing','KeyF'], ['save','KeyP'], ['guess','KeyG']
     ].forEach(([id, code]) => bindTouchButton(id, code));
 
-    // Optional AI-generated dialogue flavor text, entirely client-side (DistilGPT2 via
-    // transformers.js - no server, no API key). Off until the player turns it on in
-    // Settings, so nobody pays the ~100MB download unless they actually want this.
-    // The C++ side never calls JS synchronously here - it polls `state` once per frame,
-    // since loading and generating are both async and can take real seconds.
-    window.AIDialogue = {
-      state: 'idle',   // idle | loading | generating | ready | error
-      result: '',
-      _pipe: null,
+    // =====================================================================================================
+    // AI dialogue: Google Gemini only (no other model, no fallback). The game works out WHO is talking and how they feel (mood,
+    // relationships, memories) and the model only does the wording. The C++ side calls request() and polls `state`/`result`.
+    //
+    // COST CONTROL: the cheapest current model with thinking forced to "minimal" (thinking is billed as output); ONE request
+    // writes a whole conversation (opening, the player's answer choices, a reply to each, a follow-up round); every
+    // conversation is cached under a key describing the situation, so the same situation later costs nothing; a new
+    // situation pays for ONE conversation and only a situation that keeps repeating pays for a bigger batch.
+    //
+    // KEY SAFETY: a key in a hosted web page is visible to anyone, so it is never in the code: each player pastes their own
+    // (free at aistudio.google.com/apikey) and it lives only in their browser.
+    // =====================================================================================================
+    const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent';
+    const PRICE_IN_PER_M = 0.25, PRICE_OUT_PER_M = 1.50;   // USD per 1M tokens (output includes thinking tokens)
+    const BATCH = { talk: [1, 2], chat: [1, 2] };          // [first time a situation is seen, refill once it has been used up]
+    const FETCH_TIMEOUT_MS = 20000, MAX_ATTEMPTS = 2;      // a stalled request is abandoned after this long; a failed or rate-limited one is retried (with backoff) up to this many times
+    const CAP = { opening: 500, reply: 300, choice: 100, chat: 200 };       // NOT a filter: the dialogue box is only so big, so a runaway answer is cut at a word
+    const REFRESH_CHANCE = 0.25;                           // once every stored version was used: chance to pay for fresh ones instead of repeating
+    const MAX_VARIANTS = 18, MAX_ENTRIES = 800;
+    const LS = { key: 'geminiKey', cache: 'aiCache2', stats: 'aiStats1' };
+    const SYSTEM = 'You write dialogue for a cozy game. Characters are named after their colors (Red, Blue, Green, Yellow, Orange, Brown, Silver, ' +
+      'Magenta) and use those names for each other. Write the way real people talk. Follow each speaker\'s style PATTERN, but listed slang is only an ' +
+      'example: vary the wording, invent fresh expressions, never repeat a catchphrase every line. Their relationship to the listener sets the tone ' +
+      '(hostile if hated, wary if skeptical, flirty with a crush, teasing if close). Replies answer what was just said. Address the player as {player}. ' +
+      'No quotation marks, name labels or stage directions. Reply with ONLY the JSON requested.';
 
-      async _ensureLoaded() {
-        if (this._pipe) return;
-        this.state = 'loading';
-        const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
-        env.allowLocalModels = false;
-        this._pipe = await pipeline('text-generation', 'Xenova/distilgpt2');
+    const store = {
+      read(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return (v && typeof v === 'object') ? v : d; } catch (e) { return d; } },
+      write(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage full: caching just stops persisting */ } }
+    };
+    const pickOf = list => list[Math.floor(Math.random() * list.length)];
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    function askForKey(message) {   // a plain browser dialog: it works with paste, and keeps keystrokes away from the game
+      const k = prompt((message ? message + '\n\n' : '') + 'Paste your Google Gemini API key.\n' +
+                       'Get a free one at https://aistudio.google.com/api-keys?projectFilter=gen-lang-client-0222120615\nIt is saved only in this browser.', '');
+      if (k && k.trim()) window.AIDialogue.setKey(k.trim());
+    }
+
+    window.AIDialogue = {
+      state: 'idle',          // for the latest request: idle | generating | ready | error
+      result: '',             // the conversation (or chat) as lines joined by \n
+      ready: false, error: false, lastError: '', style: '',   // has a key / the key was rejected / why the last request failed / tone notes from dialogue.json
+      _key: '', _cache: store.read(LS.cache, {}), _stats: store.read(LS.stats, { calls: 0, hits: 0, costUSD: 0 }),
+      _gen: 0, _cooldownUntil: 0, _last: null, _timeoutMs: FETCH_TIMEOUT_MS, _active: 0, _inflight: {}, _lastMs: 0,   // _last = the stored conversation just handed to the game (so it can be rejected)
+
+      init() {
+        try { this._key = (localStorage.getItem(LS.key) || '').trim(); } catch (e) {}
+        this.ready = !!this._key;
+        this._updateBtn();
+        if (!this._key) setTimeout(() => askForKey('Characters talk using Google Gemini.'), 800);
+      },
+      setKey(k) {
+        this._key = (k || '').trim();
+        try { localStorage.setItem(LS.key, this._key); } catch (e) {}
+        this.ready = !!this._key; this.error = false; this._cooldownUntil = 0;
+        this._updateBtn();
+      },
+      _updateBtn() {
+        const b = document.getElementById('keybtn'); if (!b) return;
+        b.className = this.error ? 'rejected' : (this.ready ? '' : 'needed');
+        b.textContent = this.error ? 'API key rejected - click' : (this.ready ? 'API key' : 'API key needed - click');
+      },
+      calls() { return this._stats.calls | 0; },                       // numbers for the in-game cost line
+      hits() { return this._stats.hits | 0; },
+      microUSD() { return Math.round(this._stats.costUSD * 1e6); },
+      _saveCache() {
+        const keys = Object.keys(this._cache);
+        if (keys.length > MAX_ENTRIES) keys.sort((a, b) => this._cache[a].t - this._cache[b].t).slice(0, keys.length - MAX_ENTRIES).forEach(k => delete this._cache[k]);
+        store.write(LS.cache, this._cache);
       },
 
-      async generate(prompt) {
-        this.state = 'generating';
-        this.result = '';
-        try {
-          await this._ensureLoaded();
-          const out = await this._pipe(prompt, { max_new_tokens: 18, temperature: 0.9, top_k: 40, repetition_penalty: 1.3 });
-          this.result = out[0].generated_text.slice(prompt.length).split('\n')[0].trim();
-          this.state = 'ready';
-        } catch (e) {
-          console.error('AIDialogue error:', e);
-          this.state = 'error';
+      // which stored version to use: an unused one first; once all are used, mostly repeat (free), sometimes refresh (paid, returns -1)
+      _pick(entry) {
+        const all = entry.v.map((_, i) => i), unused = all.filter(i => !entry.u[i]);
+        if (unused.length) return pickOf(unused);
+        if (Math.random() < REFRESH_CHANCE) return -1;
+        const others = all.filter(i => i !== entry.last);
+        return others.length ? pickOf(others) : 0;
+      },
+
+      // ---- NO FILTER. Whatever the characters say is used exactly as the AI wrote it: nothing is rejected for its wording, length, punctuation,
+      // slang, language or topic. (Google's own safety system still applies on its side; if it blocks an answer the game says so.)
+      // The only repairs are structural: an answer needs some opening text to show, and a menu needs all three choices.
+      _clean(s) { return String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').replace(/^["\u201c\u201d\s]+|["\u201c\u201d\s]+$/g, '').trim(); },
+      _fit(s, maxLen) {                                   // only to protect the dialogue box: a runaway answer is cut at a word boundary
+        if (s.length <= maxLen) return s;
+        const cut = s.slice(0, maxLen), sp = cut.lastIndexOf(' ');
+        return (sp > maxLen * 0.6 ? cut.slice(0, sp) : cut).replace(/[,;:\s]+$/, '');
+      },
+      _line(s, maxLen) { return this._fit(this._clean(s), maxLen); },
+      // A conversation is stored as 13 lines joined by \n:
+      //   [opening, reply to choice 1, 2, 3, follow-up, follow-up reply 1, 2, 3, choice 1, 2, 3, tones ("+0-" = warm/neutral/rude), memory fact]
+      // (a gossip question has just [opening, reply containing {target}]). Anything missing is an empty line; the game has stand-ins.
+      _tree(it, spec) {
+        if (typeof it === 'string') it = { opening: it };
+        if (!it || typeof it !== 'object') return null;
+        let op = it.opening;                                                    // the model might name it differently: take the first piece of text it wrote
+        if (typeof op !== 'string' || !op.trim()) op = Object.values(it).find(v => typeof v === 'string' && v.trim());
+        const opening = this._line(op, CAP.opening);
+        if (!opening) return null;
+        const gen = spec.opts === '@gen' || spec.opts === '@ask', want = gen ? 3 : spec.opts === '@target' ? 1 : 0;
+        const rawReplies = Array.isArray(it.replies) ? it.replies : [];
+        const replies = [0, 1, 2].map(i => i < want ? this._line(rawReplies[i], CAP.reply) : '');
+        let choices = ['', '', ''], tones = '', fact = '';
+        if (gen) {
+          const raw = (Array.isArray(it.choices) ? it.choices : []).slice(0, 3).map(c => this._clean(c));
+          if (raw.length === 3 && raw.every(Boolean)) {                         // all three or none: with none, the conversation just has no answer menu
+            tones = raw.map(c => '+0-'.includes(c[0] || 'x') ? c[0] : '0').join('');
+            choices = raw.map(c => this._fit(('+0-'.includes(c[0] || 'x') ? c.slice(1) : c).trim(), CAP.choice));
+            if (choices.some(c => !c)) { choices = ['', '', '']; tones = ''; }
+          }
+          fact = spec.opts === '@ask' && typeof it.fact === 'string' && it.fact.includes('{a}') ? this._clean(it.fact) : '';
         }
+        let follow = '', fr = ['', '', ''];
+        if (spec.follow) {
+          const f = this._line(it.followup, CAP.opening);
+          const r = (Array.isArray(it.followupReplies) ? it.followupReplies : []).slice(0, 3).map(x => this._line(x, CAP.reply));
+          if (f && r.length === 3 && r.every(Boolean)) { follow = f; fr = r; }
+        }
+        return [opening, ...replies, follow, ...fr, ...choices, tones, fact].join('\n');
+      },
+      _chat(it) {
+        const lines = (it && Array.isArray(it.lines) ? it.lines : []).map(l => this._line(l, CAP.chat)).filter(Boolean);
+        return lines.length >= 2 ? lines.slice(0, 3).join('\n') : null;
+      },
+      _filter(items, spec) {                                                    // (the name is historical: this keeps everything that has something to show)
+        const out = [];
+        for (const it of items) { const text = spec.kind === 'chat' ? this._chat(it) : this._tree(it, spec); if (text && !out.includes(text)) out.push(text); }
+        return out;
+      },
+      // The AI did not return well-formed JSON (cut off, or it just wrote text): use what is there instead of failing.
+      _salvage(text, spec) {
+        text = text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '').trim();
+        if (!text) return [];
+        const unesc = t => { try { return JSON.parse('"' + t + '"'); } catch (e) { return t; } };
+        if (spec.kind === 'chat') {
+          const quoted = [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m => unesc(m[1])).filter(x => x && x !== 'lines');
+          return quoted.length >= 2 ? [{ lines: quoted }] : [{ lines: text.split(/\n+/).map(l => l.replace(/^[-*\d.\s]+/, '')).filter(Boolean) }];
+        }
+        const m = /"opening"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(text);              // a cut-off answer still has its opening
+        return [{ opening: m ? unesc(m[1]) : text }];
+      },
+
+      // ---- one paid call to Gemini
+      async _callGemini(spec, n) {
+        const sp = spec.speaker;
+        let user;
+        if (spec.kind === 'chat') {
+          user = spec.facts + '\n\nWrite ' + n + ' different short chats between ' + sp + ' and ' + spec.listener + '. Each has exactly 3 lines (each ONE short sentence), ' +
+                 'alternating speakers, starting with ' + sp + '; every line answers the one before it and their relationship shows. ' + sp + "'s mood: " + spec.emotion +
+                 '.\nJSON only: an array of ' + n + ' objects like {"lines":["...","...","..."]}.';
+        } else {
+          user = spec.facts + '\n\nWrite ' + sp + "'s side of a short conversation. Each of the " + n + ' object(s) has:\n' +
+                 '"opening": what ' + sp + ' first says to the player (mood: ' + spec.emotion + ')' + (spec.needQ ? ', a question the player can answer' : '') + '.\n';
+          if (spec.opts === '@gen' || spec.opts === '@ask') {
+            const ask = spec.opts === '@ask';   // a personal question: the answers are 3 different answers, and the memory fact is REQUIRED
+            user += ask ? '"choices": 3 different short answers to that question (1-3 words each, e.g. "0pizza"), each starting with 0 unless especially sweet (+) or rude (-).\n'
+                        : '"choices": 3 short answers the player could give (2-4 words each), each starting with + (warm), 0 (neutral) or - (rude).\n';
+            user += '"replies": 3 strings, ' + sp + "'s reaction to each choice in order.\n" +
+                    (ask ? '"fact": REQUIRED: one short sentence about the player with {a} where the answer goes, e.g. "the player\'s favorite food is {a}".\n' : '');
+          }
+          else if (spec.opts === '@target')
+            user += '"replies": ONE string: ' + sp + "'s reaction when the player names a character; write {target} where that name goes.\n";
+          if (spec.follow)
+            user += '"followup": one more line from ' + sp + ' building on the exchange and inviting another answer.\n' +
+                    '"followupReplies": 3 strings, the reactions to these answers in order: ' + JSON.stringify(spec.opts2) + '.\n';
+          user += 'Opening and followup: usually ONE short sentence (a speaker whose style says their openings ramble writes one long run-on instead). Every reply: ONE short sentence (about 7 words). JSON only: an array of ' + n + ' object(s).';
+        }
+        const body = {
+          systemInstruction: { parts: [{ text: SYSTEM + (this.style ? ' ' + this.style : '') }] },
+          contents: [{ role: 'user', parts: [{ text: user }] }],
+          generationConfig: { temperature: 1.0, maxOutputTokens: spec.kind === 'chat' ? n * 170 + 80 : n * 520 + 100, responseMimeType: 'application/json',
+                              thinkingConfig: { thinkingLevel: 'minimal' } }
+        };
+        this._active++;
+        try { return await this._send(spec, body); } finally { this._active--; }
+      },
+      async _send(spec, body) {
+        for (let attempt = 1; ; attempt++) {
+          let res, raw;
+          const t0 = performance.now();
+          const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), this._timeoutMs);
+          try {
+            res = await fetch(ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this._key }, body: JSON.stringify(body), signal: ctl.signal });
+            raw = await res.text();
+          } catch (e) {                                                   // a stalled or failed connection must never block everything else
+            clearTimeout(timer);
+            if (attempt < MAX_ATTEMPTS) { await sleep(1000 * attempt); continue; }
+            throw new Error(e.name === 'AbortError' ? 'the AI took too long (timed out)' : 'network problem: ' + (e.message || e));
+          }
+          clearTimeout(timer);
+          let data = null; try { data = JSON.parse(raw); } catch (e) {}
+          if (res.ok && data) {
+            const u = data.usageMetadata || {};
+            this._stats.calls++;
+            this._stats.costUSD += (u.promptTokenCount || 0) * PRICE_IN_PER_M / 1e6 + ((u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0)) * PRICE_OUT_PER_M / 1e6;
+            store.write(LS.stats, this._stats);
+            this._lastMs = Math.round(performance.now() - t0);
+            const cand = data.candidates && data.candidates[0], parts = (cand && cand.content && cand.content.parts) || [];
+            if (data.promptFeedback && data.promptFeedback.blockReason) throw new Error('the AI declined this one (safety filter)');
+            const text = parts.map(p => p.text || '').join('');
+            let arr = null; try { arr = JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); } catch (e) {}
+            if (arr && !Array.isArray(arr)) arr = [arr];
+            if (!arr) arr = this._salvage(text, spec);
+            if (!arr.length) throw new Error(cand && cand.finishReason === 'SAFETY' ? 'the AI declined this one (safety filter)' : 'the AI sent an empty answer');
+            return arr;
+          }
+          const msg = (data && data.error && data.error.message) || raw.slice(0, 200);
+          if (res.status === 401 || res.status === 403 || (res.status === 400 && /api key/i.test(msg))) { const e = new Error('key rejected: ' + msg); e.auth = true; throw e; }
+          if (res.status === 400 && /thinking/i.test(msg) && body.generationConfig.thinkingConfig) { delete body.generationConfig.thinkingConfig; attempt--; continue; }   // this model doesn't take that setting: retry without it
+          if (res.status === 429 || res.status >= 500) {
+            const hinted = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(raw), waitMs = hinted ? parseFloat(hinted[1]) * 1000 : 1500 * attempt;
+            if (attempt < MAX_ATTEMPTS && waitMs <= 6000) { await sleep(waitMs); continue; }   // a short "slow down": wait it out once and retry
+            if (res.status === 429) { this._cooldownUntil = Date.now() + Math.min(Math.max(waitMs, 8000), 60000); throw new Error('rate limit: Google says wait ' + Math.ceil(waitMs / 1000) + 's'); }   // a long one: say so right away instead of making you wait
+          }
+          throw new Error('Gemini error ' + res.status + ': ' + msg);
+        }
+      },
+
+      _deliver(mine, text) { if (mine === this._gen) { this.result = text; this.state = 'ready'; this.lastError = ''; } },
+      _fail(mine, e) {
+        this.lastError = String((e && e.message) || e);
+        if (e && e.auth) { this.error = true; this.ready = false; this._updateBtn(); }
+        if (mine === this._gen) this.state = 'error';
+      },
+      // The game found the conversation it was just handed unusable: forget that stored version so it is never served again.
+      reject() {
+        const l = this._last, e = l && this._cache[l.key];
+        this._last = null;
+        if (!e) return;
+        e.v.splice(l.idx, 1); e.u.splice(l.idx, 1); e.last = -1;
+        if (!e.v.length) delete this._cache[l.key];
+        this._saveCache();
+      },
+
+      // True while the AI is rate-limited or already busy: background chatter holds off so it can never starve YOUR conversations.
+      throttled() { return Date.now() < this._cooldownUntil || this._active >= 2; },
+      lastMs() { return this._lastMs | 0; },                                  // how long the last paid call took, in milliseconds
+
+      // Called by the game. kind: 'talk' (a conversation with the player) or 'chat' (two characters talking to each other).
+      // opts: '@gen' = write the player's answer choices too, '@ask' = a personal question (choices + a memory fact), '@target' = a gossip question (the player names a character), '' = just the opening.
+      // prefetch: write it into the cache ahead of time (the player is walking up to this villager): it never touches state/result, and a real
+      // request for the same situation that arrives while it is being written simply waits for it instead of paying twice.
+      // Keep emoticons free of @ and # (the game filters those out).
+      request(kind, key, speaker, listener, emotion, facts, needQ, keywordsCsv, fresh, opts, opts2, follow, prefetch) {
+        const spec = { kind, key, speaker, listener, emotion, facts, needQ: !!needQ, fresh: !!fresh, opts: opts || '', follow: !!follow,
+                       opts2: opts2 ? String(opts2).split('|') : [] };   // (keywordsCsv is accepted but no longer used: there is no on-topic judging)
+        if (prefetch) { this._run(spec, 0, true); return; }
+        const mine = ++this._gen;       // a newer request replaces an older one (e.g. YOU start talking during background chatter)
+        this.state = 'generating'; this.result = '';
+        this._run(spec, mine, false);
+      },
+      // one paid call: writes the answer into the cache (or returns it, for 'fresh' requests that must never be cached)
+      async _produce(spec, old) {
+        const [first, refill] = BATCH[spec.kind] || BATCH.talk;
+        const fresh = this._filter(await this._callGemini(spec, spec.fresh ? 1 : (old ? refill : first)), spec);
+        if (!fresh.length) throw new Error('the AI sent nothing to show');
+        if (spec.fresh) return { text: fresh[0] };
+        let v = old ? old.v.concat(fresh.filter(f => !old.v.includes(f))) : fresh;
+        let u = old ? old.u.concat(v.slice(old.v.length).map(() => 0)) : fresh.map(() => 0);
+        while (v.length > MAX_VARIANTS) { const j = Math.max(u.indexOf(1), 0); v.splice(j, 1); u.splice(j, 1); }
+        this._cache[spec.key] = { v, u, last: -1, t: Date.now() };
+        this._saveCache();                                                      // stored even if nobody is waiting for it: it was paid for
+        return { entry: this._cache[spec.key] };
+      },
+      async _run(spec, mine, prefetch) {
+        try {
+          if (!this._key) throw new Error('no API key');
+          if (this.error) throw new Error('API key was rejected');
+          const wait = () => { const w = this._cooldownUntil - Date.now(); if (w > 0) throw new Error('rate limit: wait ' + Math.ceil(w / 1000) + 's'); };
+          if (spec.fresh && prefetch) return;                                   // (a story chapter can't be written ahead: it depends on what is said right before it)
+          if (spec.fresh) {                                                     // story chapters and follow-ups depend on what was JUST said: never cached
+            wait(); this._last = null;
+            return this._deliver(mine, (await this._produce(spec, null)).text);
+          }
+          let entry = this._cache[spec.key];
+          if (this._inflight[spec.key]) { try { await this._inflight[spec.key]; } catch (e) {} entry = this._cache[spec.key]; }   // already being written (e.g. by a prefetch): wait for it, don't pay twice
+          if (prefetch) { if (entry) return; }                                  // something is already stored for this situation (a real request will reuse it for free, or refresh it): nothing to prepare
+          else if (entry) {
+            const idx = this._pick(entry);
+            if (idx >= 0) {                                                     // reused from the cache: free
+              entry.u[idx] = 1; entry.last = idx; this._last = { key: spec.key, idx }; this._stats.hits++; store.write(LS.stats, this._stats); this._saveCache();
+              return this._deliver(mine, entry.v[idx]);
+            }
+          }
+          wait();
+          const job = this._produce(spec, entry); this._inflight[spec.key] = job;   // (no queue: a stuck request can't block the others)
+          let made; try { made = await job; } finally { delete this._inflight[spec.key]; }
+          if (prefetch) return;                                                 // stocked for later
+          const e = made.entry, unused = e.u.map((x, i) => i).filter(i => !e.u[i]), pick = unused.length ? pickOf(unused) : 0;
+          e.u[pick] = 1; e.last = pick; this._last = { key: spec.key, idx: pick }; this._saveCache();
+          this._deliver(mine, e.v[pick]);
+        } catch (e) { if (!prefetch || e.auth) this._fail(mine, e); }
       }
     };
+    window.AIDialogue.init();
+    document.getElementById('keybtn').onclick = () => askForKey(window.AIDialogue.error ? 'Google rejected that key.' : '');
   </script>
   {{{ SCRIPT }}}
 </body>

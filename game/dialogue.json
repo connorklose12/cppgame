@@ -1,12 +1,5 @@
 {
-  "elder": {
-    "happy": ["Hello, {playerName}! Always a pleasure.", "Good to see a friendly face, {playerName}."],
-    "neutral": ["Hello, {playerName}.", "Good to see you again."],
-    "mad": ["Oh. It's you, {playerName}.", "What do you want now?"]
-  },
-  "villager": {
-    "happy": ["Oh, {playerName}! Great to see you.", "You always brighten my day, {playerName}."],
-    "neutral": ["Hello, {playerName}.", "Nice weather today, isn't it?"],
-    "mad": ["What do YOU want.", "Ugh. Not you again."]
-  }
+  "intro": [
+    "Spicy and a little funny. Villagers gossip about each other and wonder about the world outside."
+  ]
 }
